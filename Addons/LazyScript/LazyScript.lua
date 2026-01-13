@@ -193,19 +193,34 @@ function lazyScript.OnEvent()
 			lazyScript.perPlayerConf.BoundFormsTable = {}
 		end
 		
-		elseif (event == "PLAYER_LOGIN") then
-		
-		this:RegisterEvent("PLAYER_ENTERING_WORLD")
-		this:RegisterEvent("PLAYER_ENTER_COMBAT")
-		this:RegisterEvent("PLAYER_LEAVE_COMBAT")
-		this:RegisterEvent("PLAYER_TARGET_CHANGED")
-		this:RegisterEvent("PLAYER_REGEN_DISABLED")
-		this:RegisterEvent("PLAYER_REGEN_ENABLED")
-		this:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
-		this:RegisterEvent("SPELLS_CHANGED")
-		this:RegisterEvent("UI_ERROR_MESSAGE")
-		
-		-- Determine if inventory position of items need to be checked again
+	elseif (event == "PLAYER_LOGIN") then
+	
+	-- Display nampower enhancement status
+	if lazyScript.hasNampowerSupport then
+		lazyScript.p("|cff00ff00LazyScript Enhanced:|r nampower detected - using improved spell detection")
+		if not lazyScript.hasNampowerRangeCheck then
+			lazyScript.p("|cffffaa00Warning:|r nampower range check not available")
+		end
+		if not lazyScript.hasNampowerCastingInfo then
+			lazyScript.p("|cffffaa00Warning:|r nampower casting info not available")
+		end
+		lazyScript.p("|cffaaaaaa Tip:|r Use /lazyscript spelldebug to toggle detailed spell check logging")
+	else
+		lazyScript.p("|cffffaa00LazyScript:|r Using standard spell detection (install nampower for improved reliability)")
+	end
+	
+	-- Initialize spell check debug flag
+	lazyScript.spellCheckDebug = false
+	
+	this:RegisterEvent("PLAYER_ENTERING_WORLD")
+	this:RegisterEvent("PLAYER_ENTER_COMBAT")
+	this:RegisterEvent("PLAYER_LEAVE_COMBAT")
+	this:RegisterEvent("PLAYER_TARGET_CHANGED")
+	this:RegisterEvent("PLAYER_REGEN_DISABLED")
+	this:RegisterEvent("PLAYER_REGEN_ENABLED")
+	this:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+	this:RegisterEvent("SPELLS_CHANGED")
+	this:RegisterEvent("UI_ERROR_MESSAGE")		-- Determine if inventory position of items need to be checked again
 		this:RegisterEvent("BAG_UPDATE")
 		
 		-- Deathstimator
@@ -1045,16 +1060,22 @@ function lazyScript.SlashCommand(line)
 		elseif (cmd == "resetDefaultForms") then
 		lazyScript.resetLazyScriptForms()
 		
-		elseif (cmd == "resetAllForms") then
-		lazyScript.resetLazyScriptForms(true)
-		
-		elseif (lazyScript.CustomCommandLineArgs ~= nil) then
-		foundCMD = lazyScript.CustomCommandLineArgs(cmd, args)
-		
-		else
-		foundCMD = false
-		
+	elseif (cmd == "resetAllForms") then
+	lazyScript.resetLazyScriptForms(true)
+	
+	elseif (cmd == "spelldebug") then
+	lazyScript.spellCheckDebug = not lazyScript.spellCheckDebug
+	if lazyScript.spellCheckDebug then
+		lazyScript.p("|cff00ff00Spell check debug: ENABLED|r - You will see detailed spell usability checks")
+	else
+		lazyScript.p("|cffffaa00Spell check debug: DISABLED|r")
 	end
+	
+	elseif (lazyScript.CustomCommandLineArgs ~= nil) then
+	foundCMD = lazyScript.CustomCommandLineArgs(cmd, args)
+	
+	else
+	foundCMD = false	end
 	
 	if (not foundCMD) then
 		local noParse = false

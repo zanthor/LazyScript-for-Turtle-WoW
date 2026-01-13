@@ -2,6 +2,25 @@ lazyScript.metadata:updateRevisionFromKeyword("$Revision: 743 $")
 
 -- Action Objects
 
+-- Enhanced spell detection using nampower/SuperWoW if available
+lazyScript.hasNampowerSupport = (GetSpellIdForName ~= nil and IsSpellUsable ~= nil)
+lazyScript.hasNampowerRangeCheck = (IsSpellInRange ~= nil)
+lazyScript.hasNampowerCastingInfo = (GetCurrentCastingInfo ~= nil)
+
+-- Enhanced targeting using UnitXP_SP3 if available
+lazyScript.hasUnitXPSupport = false
+if UnitXP then
+	local test, result = pcall(UnitXP, "nop", "nop")
+	if test then
+		lazyScript.hasUnitXPSupport = true
+		lazyScript.d("LazyScript: Enhanced targeting enabled (UnitXP_SP3 detected)")
+	end
+end
+
+if lazyScript.hasNampowerSupport then
+	lazyScript.d("LazyScript: Enhanced spell detection enabled (nampower detected)")
+end
+
 function lazyScript.GetActionNameFromTooltip(actionSlot)
 	return lazyScript.Tooltip:GetActionTextLeftN(actionSlot, 1)
 end
@@ -81,6 +100,16 @@ function lazyScript.Action:CompareTexture(texture)
 end
 
 function lazyScript.Action:GetSlot(sayNothing)
+	-- If we have nampower, try to verify spell exists in spellbook directly
+	if lazyScript.hasNampowerSupport and self.name then
+		if not self.nampowerSpellId then
+			self.nampowerSpellId = GetSpellIdForName(self.name)
+			if self.nampowerSpellId and self.nampowerSpellId > 0 then
+				lazyScript.d("LazyScript: Found spell '" .. self.name .. "' in spellbook via nampower (ID: " .. self.nampowerSpellId .. ")")
+			end
+		end
+	end
+
 	if (self.slot) then
 		if (not self.slotCheckedSinceUpdate) then
 			if (self.texture) then
@@ -162,6 +191,62 @@ function lazyScript.Action:GetSlot(sayNothing)
 end
 
 function lazyScript.Action:FindSpellRanks(sayNothing)
+	-- Try using nampower first if available
+	if lazyScript.hasNampowerSupport and self.name then
+		if not self.nampowerSpellId then
+			self.nampowerSpellId = GetSpellIdForName(self.name)
+		end
+		
+		if self.nampowerSpellId and self.nampowerSpellId > 0 then
+			-- We have the spell, now try to get slot info
+			if GetSpellSlotTypeIdForName then
+				local slot, bookType, spellId = GetSpellSlotTypeIdForName(self.name)
+				if slot and slot > 0 then
+					-- Cache this info
+					if not self.spellIndexStart then
+						-- IMPORTANT: GetSpellSlotTypeIdForName returns the HIGHEST rank slot
+						-- We need to find rank 1 by searching backwards
+						local maxRankSlot = slot
+						local maxRank = nil
+						
+						-- Try to extract rank from the max rank spell
+						if GetSpellNameAndRankForId then
+							local spellName, spellRank = GetSpellNameAndRankForId(spellId)
+							if spellRank and spellRank ~= "" then
+								local _, _, rankNum = string.find(spellRank, "(%d+)")
+								if rankNum then
+									maxRank = tonumber(rankNum)
+								end
+							end
+						end
+						
+						-- If we couldn't find a rank number, assume single rank spell
+						if not maxRank then
+							self.spellIndexStart = slot
+							self.rankCount = 1
+							self.maxRank = 1
+							if not sayNothing then
+								lazyScript.d("LazyScript: Found single-rank spell via nampower - slot: " .. slot)
+							end
+							return self.spellIndexStart, self.rankCount, self.maxRank
+						end
+						
+						-- Find rank 1 by going backwards from max rank
+						-- Spells are stored consecutively in the spellbook: rank1, rank2, rank3, etc.
+						self.spellIndexStart = maxRankSlot - (maxRank - 1)
+						self.rankCount = maxRank
+						self.maxRank = maxRank
+						
+						if not sayNothing then
+							lazyScript.d("LazyScript: Found spell ranks via nampower - first slot: " .. self.spellIndexStart .. ", rankCount: " .. self.rankCount .. ", maxRank: " .. self.maxRank)
+						end
+					end
+					return self.spellIndexStart, self.rankCount, self.maxRank
+				end
+			end
+		end
+	end
+
 	-- No texture therefore it must be a macro, or an action they want executed directly
 	-- Tough :P
 	if not self.texture then
@@ -344,16 +429,118 @@ function lazyScript.Action:Use()
 end
 
 function lazyScript.Action:IsUsable(sayNothing)
+	-- Try to cache spell ID first if using nampower
+	if lazyScript.hasNampowerSupport and self.name and not self.nampowerSpellId then
+		self.nampowerSpellId = GetSpellIdForName(self.name)
+	end
+
+	-- Enhanced version using nampower if available
+	if lazyScript.hasNampowerSupport and self.nampowerSpellId and self.nampowerSpellId > 0 then
+		-- Enable detailed logging with: /lazyscript spelldebug
+		local debugLog = lazyScript.spellCheckDebug
+		if debugLog then
+			lazyScript.p("[DEBUG] IsUsable [" .. self.name .. "]: Using nampower (ID: " .. self.nampowerSpellId .. ")")
+		end
+		
+		-- Check if spell is usable via nampower (checks reactive, mana, requirements, but NOT cooldown)
+		local usable, notEnoughMana = IsSpellUsable(self.nampowerSpellId)
+		if debugLog then
+			lazyScript.p("  IsSpellUsable: " .. tostring(usable) .. ", OOM: " .. tostring(notEnoughMana))
+		end
+		if usable ~= 1 then
+			if debugLog then lazyScript.p("  FAIL: Not usable") end
+			return false
+		end
+
+		-- CRITICAL: nampower's IsSpellUsable does NOT check cooldowns!
+		-- We MUST have an action slot to check cooldowns
+		if not self:GetSlot(true) then -- silent slot check
+			if debugLog then 
+				lazyScript.p("  FAIL: No action slot - cannot check cooldown with nampower")
+				lazyScript.p("  Falling back to action bar method")
+			end
+			-- Fall back to the original action bar method below
+			-- This ensures we don't return false positives
+		else
+			-- We have a slot, check cooldown
+			local cdStart, cdDuration = GetActionCooldown(self.slot)
+			if debugLog then
+				lazyScript.p("  CD: start=" .. tostring(cdStart) .. ", dur=" .. tostring(cdDuration))
+			end
+			-- If cdStart is 0, spell is ready (not on cooldown)
+			if cdStart ~= 0 then
+				if debugLog then 
+					local cdRemaining = cdDuration - (GetTime() - cdStart)
+					lazyScript.p("  FAIL: On CD, remaining: " .. string.format("%.2f", cdRemaining) .. "s")
+				end
+				return false
+			end
+
+			-- Check if already casting this spell
+			if lazyScript.hasNampowerCastingInfo then
+				local castId, visId, autoId, casting, channeling, onswing, autoattack = GetCurrentCastingInfo()
+				if debugLog then
+					lazyScript.p("  Casting: castId=" .. tostring(castId) .. ", visId=" .. tostring(visId))
+				end
+				if castId == self.nampowerSpellId or visId == self.nampowerSpellId then
+					if debugLog then lazyScript.p("  FAIL: Already casting") end
+					return false
+				end
+			end
+
+			-- Check range if we have the enhanced range check
+			if lazyScript.hasNampowerRangeCheck then
+				local targetType = "target"
+				if self.parent and self.parent.target == "player" then
+					targetType = "player"
+				end
+				local inRange = IsSpellInRange(self.nampowerSpellId, targetType)
+				if debugLog then
+					lazyScript.p("  Range (" .. targetType .. "): " .. tostring(inRange))
+				end
+				-- inRange: 1 = in range, 0 = out of range, -1 = not single target spell
+				if inRange == 0 then
+					if debugLog then lazyScript.p("  FAIL: Out of range") end
+					return false
+				end
+			end
+
+			-- All checks passed with nampower
+			if debugLog then lazyScript.p("  SUCCESS: All nampower checks passed") end
+			return true
+		end
+	end
+
+	-- Fall back to original action bar method
+	if lazyScript.spellCheckDebug then
+		lazyScript.p("[DEBUG] IsUsable [" .. self.name .. "]: Using action bar method")
+	end
+	
 	-- Run this here to make Action:Use quicker by not always having to search the spell book
 	local spellIndexStart, rankCount, maxRank = self:FindSpellRanks(sayNothing)
 	if (self:GetSlot(sayNothing)) then
 		local inRange = IsActionInRange(self.slot)
-		if (IsUsableAction(self.slot) == 1 and
-			GetActionCooldown(self.slot) == 0 and -- not in cooldown
-			not IsCurrentAction(self.slot) and -- not already being used
-			(inRange == 1 or inRange == nil or (self.parent and self.parent.target == "player"))) then
-			return true
+		local isUsableAction = IsUsableAction(self.slot)
+		local cdStart, cdDuration = GetActionCooldown(self.slot)
+		local isCurrent = IsCurrentAction(self.slot)
+		
+		if lazyScript.spellCheckDebug then
+			lazyScript.p("  Slot: " .. self.slot .. ", Usable: " .. tostring(isUsableAction))
+			lazyScript.p("  CD: " .. tostring(cdStart) .. "/" .. tostring(cdDuration) .. ", Current: " .. tostring(isCurrent) .. ", Range: " .. tostring(inRange))
 		end
+		
+		-- Original check: cdStart == 0 means not on cooldown
+		if (isUsableAction == 1 and
+			cdStart == 0 and -- not in cooldown
+			not isCurrent and -- not already being used
+			(inRange == 1 or inRange == nil or (self.parent and self.parent.target == "player"))) then
+			if lazyScript.spellCheckDebug then lazyScript.p("  SUCCESS") end
+			return true
+		else
+			if lazyScript.spellCheckDebug then lazyScript.p("  FAIL") end
+		end
+	else
+		if lazyScript.spellCheckDebug then lazyScript.p("  FAIL: No slot") end
 	end
 	return false
 end
@@ -460,9 +647,12 @@ function lazyScript.DeCacheActionRanks()
 		action.rank = nil
 		action.spellIndexStart = nil
 		action.maxRank = nil
+		-- Clear nampower cache as well
+		action.nampowerSpellId = nil
 	end
 	for _, action in pairs(lazyScript.otherActions) do
 		action.rank = nil
+		action.nampowerSpellId = nil
 	end
 end
 
@@ -477,6 +667,18 @@ function lazyScript.DeCacheItemSlots()
 		item.slotCheckedSinceUpdate = false
 	end
 	for _, item in pairs(lazyScript.offHandItems) do
+		item.slotCheckedSinceUpdate = false
+	end
+	for _, item in pairs(lazyScript.rangedItems) do
+		item.slotCheckedSinceUpdate = false
+	end
+	for _, item in pairs(lazyScript.libramItems) do
+		item.slotCheckedSinceUpdate = false
+	end
+	for _, item in pairs(lazyScript.idolItems) do
+		item.slotCheckedSinceUpdate = false
+	end
+	for _, item in pairs(lazyScript.totemItems) do
 		item.slotCheckedSinceUpdate = false
 	end
 	for _, item in pairs(lazyScript.applyWeaponBuffActions) do
@@ -557,13 +759,17 @@ lazyScript.SetForm.IsUsable = lazyScript.AlwaysUsable
 -- Equip objects
 
 lazyScript.EquipItem = {}
-function lazyScript.EquipItem:New(code, name, id, equipSlot)
+function lazyScript.EquipItem:New(code, name, id, equipSlot, triggersGlobal)
 	local obj = {}
 	setmetatable(obj, { __index = self })
 	obj.code = code
 	obj.codePattern = "^" .. code .. "$"
 	obj.name = name
-	obj.triggersGlobal = true -- weapon switching triggers a cooldown in combat
+	if triggersGlobal ~= nil then
+		obj.triggersGlobal = triggersGlobal
+	else
+		obj.triggersGlobal = true -- weapon switching triggers a cooldown in combat
+	end
 	obj.id = id
 	obj.equipSlot = equipSlot
 	obj.requiresSpellStopCasting = false
@@ -1092,7 +1298,18 @@ end
 lazyScript.pseudoActions.targetNearest = lazyScript.PseudoAction:New("targetNearest", "Target Nearest", false)
 function lazyScript.pseudoActions.targetNearest:Use()
 	-- this pseudo action always succeeds, so no action after it will be executed
-	TargetNearestEnemy()
+	
+	-- Use UnitXP_SP3 if available (more reliable, skips dead targets automatically)
+	if lazyScript.hasUnitXPSupport then
+		local success = pcall(UnitXP, "target", "nearestEnemy")
+		if not success then
+			-- Fallback to vanilla if UnitXP fails
+			TargetNearestEnemy()
+		end
+	else
+		TargetNearestEnemy()
+	end
+	
 	lazyScript.recordAction(self.code)
 	self.everyTimer = GetTime()
 	self.nowAndEveryTimer = self.everyTimer

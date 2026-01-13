@@ -16,6 +16,10 @@ lazyScript.shapeshift = {}
 lazyScript.forms = {}
 lazyScript.mainHandItems = {}
 lazyScript.offHandItems = {}
+lazyScript.rangedItems = {}
+lazyScript.libramItems = {}
+lazyScript.idolItems = {}
+lazyScript.totemItems = {}
 lazyScript.equippedItems = {}
 lazyScript.applyWeaponBuffActions = {}
 lazyScript.castSpellByRankActions = {}
@@ -444,6 +448,86 @@ function lazyScript.bitParsers.equipOffHand(bit, actions, masks)
 		lazyScript.offHandItems[item] = lazyScript.EquipItem:New(item, itemName, itemId, 17)
 	end
 	table.insert(actions, lazyScript.offHandItems[item])
+	return true
+end
+
+function lazyScript.bitParsers.equipRanged(bit, actions, masks)
+	if (not lazyScript.rebit(bit, "^equipRanged=(.+)$")) then
+		return false
+	end
+	local item = lazyScript.match1
+	local itemId
+	local itemName
+	if (string.find(item, '^%d')) then
+		itemId = tonumber(item)
+		itemName = "Item "..itemId
+		else
+		itemName = item
+	end
+	if (not lazyScript.rangedItems[item]) then
+		lazyScript.rangedItems[item] = lazyScript.EquipItem:New(item, itemName, itemId, 18)
+	end
+	table.insert(actions, lazyScript.rangedItems[item])
+	return true
+end
+
+function lazyScript.bitParsers.equipLibram(bit, actions, masks)
+	if (not lazyScript.rebit(bit, "^equipLibram=(.+)$")) then
+		return false
+	end
+	local item = lazyScript.match1
+	local itemId
+	local itemName
+	if (string.find(item, '^%d')) then
+		itemId = tonumber(item)
+		itemName = "Item "..itemId
+		else
+		itemName = item
+	end
+	if (not lazyScript.libramItems[item]) then
+		lazyScript.libramItems[item] = lazyScript.EquipItem:New(item, itemName, itemId, 18)
+	end
+	table.insert(actions, lazyScript.libramItems[item])
+	return true
+end
+
+function lazyScript.bitParsers.equipIdol(bit, actions, masks)
+	if (not lazyScript.rebit(bit, "^equipIdol=(.+)$")) then
+		return false
+	end
+	local item = lazyScript.match1
+	local itemId
+	local itemName
+	if (string.find(item, '^%d')) then
+		itemId = tonumber(item)
+		itemName = "Item "..itemId
+		else
+		itemName = item
+	end
+	if (not lazyScript.idolItems[item]) then
+		lazyScript.idolItems[item] = lazyScript.EquipItem:New(item, itemName, itemId, 18)
+	end
+	table.insert(actions, lazyScript.idolItems[item])
+	return true
+end
+
+function lazyScript.bitParsers.equipTotem(bit, actions, masks)
+	if (not lazyScript.rebit(bit, "^equipTotem=(.+)$")) then
+		return false
+	end
+	local item = lazyScript.match1
+	local itemId
+	local itemName
+	if (string.find(item, '^%d')) then
+		itemId = tonumber(item)
+		itemName = "Item "..itemId
+		else
+		itemName = item
+	end
+	if (not lazyScript.totemItems[item]) then
+		lazyScript.totemItems[item] = lazyScript.EquipItem:New(item, itemName, itemId, 18)
+	end
+	table.insert(actions, lazyScript.totemItems[item])
 	return true
 end
 
@@ -1186,6 +1270,51 @@ function lazyScript.bitParsers.ifDueling(bit, actions, masks)
 end
 
 
+function lazyScript.masks.HostileTarget()
+	return function(sayNothing)
+		-- Check if Cursive Tank Tracker is loaded
+		if not _G.CTT_Frames or type(_G.CTT_Frames) ~= "table" then
+			return false
+		end
+		
+		if not _G.CTT_GetMobTargetName or type(_G.CTT_GetMobTargetName) ~= "function" then
+			return false
+		end
+		
+		local playerName = UnitName("player")
+		if not playerName then
+			return false
+		end
+		
+		-- Scan all registered Cursive frames for hostile mobs targeting the player
+		for _, frame in ipairs(_G.CTT_Frames) do
+			if frame and frame.IsShown and frame:IsShown() then
+				-- Check if the mob is in combat
+				local unit = frame.unit or frame.unitToken or frame.guid
+				if unit and UnitExists(unit) and UnitAffectingCombat(unit) == 1 then
+					-- Check if this mob is targeting the player
+					local targetName = _G.CTT_GetMobTargetName(frame)
+					if targetName == playerName then
+						return true
+					end
+				end
+			end
+		end
+		
+		return false
+	end
+end
+
+function lazyScript.bitParsers.ifHostileTarget(bit, actions, masks)
+	if (not lazyScript.rebit(bit, "^if(Not)?HostileTarget$")) then
+		return false
+	end
+	local negate = lazyScript.negate1()
+	table.insert(masks, lazyScript.negWrapper(lazyScript.masks.HostileTarget(), negate))
+	return true
+end
+
+
 -- Problematic textures:
 --   a Hunter with the Aspect of the Beast/Cheetah buff
 --   a Hunter in the group with the Aspect of the Pack buff
@@ -1301,6 +1430,18 @@ end
 
 function lazyScript.masks.IsGlobalCooldown(gcdActionObj)
 	return function(sayNothing)
+		-- Try nampower direct spell cooldown check first
+		if lazyScript.hasNampowerSupport and gcdActionObj.name then
+			local bookindex, booktype = GetSpellSlotTypeIdForName(gcdActionObj.name)
+			if bookindex and booktype and bookindex > 0 then
+				local start, duration = GetSpellCooldown(bookindex, booktype)
+				if start and duration then
+					return (duration > 0.1)
+				end
+			end
+		end
+		
+		-- Fallback: original action bar slot method
 		local slot = gcdActionObj:GetSlot(true)
 		if not slot then
 			if not sayNothing then
@@ -1741,7 +1882,12 @@ end
 
 function lazyScript.masks.UnitAlive(unitId)
 	return function(sayNothing)
-		return (not UnitIsDead(unitId))
+		-- UnitIsDead returns 1 for dead, nil for alive
+		-- We need to explicitly check the unit exists first
+		if not UnitExists(unitId) then
+			return nil  -- Unit doesn't exist, condition fails
+		end
+		return (UnitIsDead(unitId) ~= 1)
 	end
 end
 
