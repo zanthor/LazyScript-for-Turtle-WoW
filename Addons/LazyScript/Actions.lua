@@ -429,9 +429,16 @@ function lazyScript.Action:Use()
 end
 
 function lazyScript.Action:IsUsable(sayNothing)
+	if lazyScript.spellCheckDebug then
+		lazyScript.p("[DEBUG] IsUsable called for: " .. tostring(self.name) .. " (code: " .. tostring(self.code) .. ")")
+	end
+	
 	-- Try to cache spell ID first if using nampower
 	if lazyScript.hasNampowerSupport and self.name and not self.nampowerSpellId then
 		self.nampowerSpellId = GetSpellIdForName(self.name)
+		if lazyScript.spellCheckDebug then
+			lazyScript.p("[DEBUG] Cached spell ID for [" .. self.name .. "]: " .. tostring(self.nampowerSpellId))
+		end
 	end
 
 	-- Enhanced version using nampower if available
@@ -453,20 +460,51 @@ function lazyScript.Action:IsUsable(sayNothing)
 		end
 
 		-- CRITICAL: nampower's IsSpellUsable does NOT check cooldowns!
-		-- We MUST have an action slot to check cooldowns
-		if not self:GetSlot(true) then -- silent slot check
+		-- Try to get spell slot from nampower first
+		local cdStart, cdDuration = 0, 0
+		local spellSlot, bookType
+		if GetSpellSlotTypeIdForName then
+			spellSlot, bookType = GetSpellSlotTypeIdForName(self.name)
+			if spellSlot and spellSlot > 0 then
+				cdStart, cdDuration = GetSpellCooldown(spellSlot, bookType)
+				if debugLog then
+					lazyScript.p("  CD (nampower slot): slot=" .. spellSlot .. ", start=" .. tostring(cdStart) .. ", dur=" .. tostring(cdDuration))
+				end
+			end
+		end
+		
+		-- Fallback to FindSpellRanks if nampower slot lookup failed
+		local spellIndexStart, rankCount, maxRank
+		if not spellSlot then
+			spellIndexStart, rankCount, maxRank = self:FindSpellRanks(true) -- silent
+			
+			if spellIndexStart then
+				-- Use spell book to check cooldown (most reliable)
+				local spellIndex = spellIndexStart + rankCount - 1
+				cdStart, cdDuration = GetSpellCooldown(spellIndex, BOOKTYPE_SPELL)
+				if debugLog then
+					lazyScript.p("  CD (spellbook): start=" .. tostring(cdStart) .. ", dur=" .. tostring(cdDuration))
+				end
+			elseif self:GetSlot(true) then -- silent slot check
+				-- Fall back to action slot if we have one
+				cdStart, cdDuration = GetActionCooldown(self.slot)
+				if debugLog then
+					lazyScript.p("  CD (action slot): start=" .. tostring(cdStart) .. ", dur=" .. tostring(cdDuration))
+				end
+			end
+		end
+		
+		-- Check if we successfully got cooldown info
+		if not spellSlot and not spellIndexStart and not self.slot then
 			if debugLog then 
-				lazyScript.p("  FAIL: No action slot - cannot check cooldown with nampower")
-				lazyScript.p("  Falling back to action bar method")
+				lazyScript.p("  FAIL: Cannot find spell in spellbook or action bars to check cooldown")
 			end
-			-- Fall back to the original action bar method below
-			-- This ensures we don't return false positives
-		else
-			-- We have a slot, check cooldown
-			local cdStart, cdDuration = GetActionCooldown(self.slot)
-			if debugLog then
-				lazyScript.p("  CD: start=" .. tostring(cdStart) .. ", dur=" .. tostring(cdDuration))
-			end
+			-- Cannot verify cooldown - must fail
+			return false
+		end
+
+		-- Check cooldown
+		if spellSlot or spellIndexStart or self.slot then
 			-- If cdStart is 0, spell is ready (not on cooldown)
 			if cdStart ~= 0 then
 				if debugLog then 
@@ -482,7 +520,8 @@ function lazyScript.Action:IsUsable(sayNothing)
 				if debugLog then
 					lazyScript.p("  Casting: castId=" .. tostring(castId) .. ", visId=" .. tostring(visId))
 				end
-				if castId == self.nampowerSpellId or visId == self.nampowerSpellId then
+				-- Only check castId (actual cast), not visId (visual animation can persist)
+				if castId == self.nampowerSpellId then
 					if debugLog then lazyScript.p("  FAIL: Already casting") end
 					return false
 				end
